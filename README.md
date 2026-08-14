@@ -1,6 +1,6 @@
 # MailMavenMCP
 
-A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that lets Claude read, search, and manage your email in [MailMaven](https://smallcubed.com/) — the macOS email client from Smallcubed.
+A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that lets Claude or other MCP-compliant agents read, search, and manage your email in [MailMaven](https://smallcubed.com/) — the macOS email client from Smallcubed.
 
 The server drives MailMaven through AppleScript, so it works with your existing accounts and mailboxes exactly as they're set up in the app. No extra IMAP credentials, API keys, or cloud sync required.
 
@@ -8,7 +8,7 @@ The server drives MailMaven through AppleScript, so it works with your existing 
 
 ---
 
-## What it lets Claude do
+## What it lets Claude or other agents do
 
 Once connected, Claude gains numerous tools for working with MailMaven:
 
@@ -33,7 +33,7 @@ Once connected, Claude gains numerous tools for working with MailMaven:
 **Archiving**
 - `export_and_archive_to_eaglefiler`
 
-Ask Claude things like *"find unread emails from my accountant this month"*, *"flag anything from my boss as high importance"*, or *"draft a reply using my work signature"* and it will call these tools directly against your running copy of MailMaven.
+Ask the agent things like *"find unread emails from my accountant this month"*, *"flag anything from my boss as high importance"*, or *"draft a reply using my work signature"* and it will call these tools directly against your running copy of MailMaven.
 
 ---
 
@@ -41,8 +41,8 @@ Ask Claude things like *"find unread emails from my accountant this month"*, *"f
 
 - macOS with **MailMaven** installed and configured with at least one account
 - **Python 3.10+**
-- The `mcp` Python package (provides `mcp.server.fastmcp.FastMCP`)
-- Claude Desktop or Claude Code
+- The `fastmcp` Python package (provides `mcp.server.fastmcp.FastMCP`)
+- Claude Desktop or Claude Code or some other MCP-compliant agent
 
 ---
 
@@ -55,7 +55,7 @@ git clone https://github.com/Smallcubed/MailMavenMCP.git
 cd MailMavenMCP
 python3 -m venv .venv
 source .venv/bin/activate
-pip install mcp
+pip install fastmcp
 ```
 
 Note the full path to `MavenMCP.py` — you'll need it in the config step below. You can get it with:
@@ -97,26 +97,36 @@ claude mcp add mailmaven -- /absolute/path/to/MailMavenMCP/.venv/bin/python3 /ab
 
 Run `claude mcp list` afterward to confirm it shows as connected.
 
+
+### Other agents
+
+Follow the necessary instructions using the value `/absolute/path/to/MailMavenMCP/.venv/bin/python3` for the command and `/absolute/path/to/MailMavenMCP/MavenMCP.py` for the arguments.
+
+Sorry that we cannot provide instructions for all agents.
+
+
 ## 3. Grant automation permissions
 
-The server calls MailMaven through AppleScript, so macOS needs to let the process that launches it (Claude Desktop, Terminal, or Claude Code) control MailMaven.
+The server calls MailMaven through AppleScript, so macOS needs to let the process that launches it (Claude Desktop, Claude Code, Terminal or other agent) control MailMaven.
 
 1. Open **MailMaven** and leave it running — the server can't reach it otherwise.
 2. Open **System Settings → Privacy & Security → Automation**.
-3. The first time Claude tries to use a MailMaven tool, macOS will prompt you to allow Claude (or Terminal) to control "MailMaven." Click **Allow**.
+3. The first time the agent tries to use a MailMaven tool, macOS will prompt you to allow Claude (or Terminal) to control "MailMaven." Click **Allow**.
 4. If you don't see a prompt, or accidentally denied it, find the app in the Automation list and manually check the **MailMaven** box next to it.
 
 ## 4. Verify it worked
 
-Make sure MailMaven is open, then ask Claude something simple like:
+Make sure MailMaven is open, then ask the agent something simple like:
 
 > "List my MailMaven accounts."
 
-or 
+or
 
 > "Summarize the first selected message of the front MailMaven viewer"
 
-If it responds with information from Maven, the connection is working. If a MailMaven tool appears in Claude's tool list but calls fail, check the troubleshooting section below.
+If it responds with information from Maven, the connection is working.
+
+If a MailMaven tool appears in Claude's tool list but calls fail, check the troubleshooting section below.
 
 ---
 
@@ -159,7 +169,7 @@ Restart Claude Desktop, or in Claude Code run `claude mcp remove mailmaven` and 
 
 - This server only talks to the MailMaven app on your own Mac — it doesn't send your mail anywhere else.
 - `delete_message` moves messages to Trash; nothing is permanently deleted through these tools.
-- Because Claude can read message content and send/compose mail through this server, treat it like any other tool with access to your inbox: review what Claude is about to send before you approve it.
+- Because agents can read message content and send/compose mail through this server, treat it like any other tool with access to your inbox: review what Claude is about to send before you approve it.
 
 ## License
 
