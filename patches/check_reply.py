@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Functional check: reply_message keeps LF text and a > quote, and does not send.
+"""Functional check: a hidden reply keeps the body lines and is not sent.
 
 Run on the Mac with the MailMavenMCP venv python:
     ~/mcp/MailMavenMCP/.venv/bin/python patches/check_reply.py [path/to/MavenMCP.py]
 
-Each case replies to the newest inbox message with the composer hidden. The
-tool checks the text it set against the text MailMaven stored, then deletes
-the composer without saving. No message is sent.
+Opens one reply with show_window false, reads the composer content back,
+and compares the body line by line. MailMaven's composer does not support
+close. The hidden composer is discarded when its transaction ends. The
+check compares composer count, draft count, and window count so nothing
+was saved or sent.
 Prints JSON {status, details}.
 Exit: 0 = ok, 1 = missing, 2 = mismatch / error.
 """
@@ -17,7 +19,8 @@ import os
 import subprocess
 import sys
 
-MARKER = "# PAGOCS-PATCH: reply v2"
+MARKER = "# PAGOCS-PATCH: reply v1"
+PROBE = "----MCP-REPLY-PROBE----"
 REQUIRED = (
     "identifier",
     "body",
@@ -27,6 +30,13 @@ REQUIRED = (
     "show_window",
     "send",
 )
+BODY_LINES = (
+    "Első sor áéíóöőúüű ÁÉÍÓÖŐÚÜŰ",
+    'Idézet: "szia" és útvonal c:\\notes\\mail',
+    "",
+    "Utolsó sor",
+)
+INDENT = "    "
 
 path = os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else "~/mcp/MailMavenMCP/MavenMCP.py")
 out = {"status": None, "details": ""}
@@ -74,20 +84,95 @@ def unwrap(fn):
     return getattr(fn, "fn", fn)
 
 
-def window_count():
-    """Return how many MailMaven windows are open.
+def as_lines(text):
+    """Split composer text into lines without dropping a blank line in the middle.
+
+    Args:
+        text: Composer content. CR and CRLF count as one line break.
 
     Returns:
-        The window count.
+        Lines without a trailing empty entry caused only by a final break.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if text.endswith("\n"):
+        text = text[:-1]
+    if text == "":
+        return []
+    return text.split("\n")
+
+
+def mail_snapshot():
+    """Count composers, windows, and drafts.
+
+    Returns:
+        (composer_count, window_count, draft_count).
 
     Raises:
         RuntimeError: MailMaven did not answer.
     """
-    script = 'tell application "MailMaven" to count of windows'
+    script = r'''
+tell application "MailMaven"
+    set _c to count of composer messages
+    set _w to count of windows
+    set _d to 0
+    repeat with a in accounts
+        try
+            set _d to _d + (count of messages of draft mailbox of a)
+        end try
+    end repeat
+    return (_c as string) & "," & (_w as string) & "," & (_d as string)
+end tell
+'''
     proc = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip())
-    return int(proc.stdout.strip())
+    parts = proc.stdout.strip().split(",")
+    if len(parts) != 3:
+        raise RuntimeError("snapshot " + proc.stdout.strip())
+    return tuple(int(part) for part in parts)
+
+
+def install_probe(mod):
+    """Read composer content inside reply_message's transaction.
+
+    The composer does not exist after the transaction, so the read has to
+    happen in the script reply_message already built. The wrapper returns
+    only the composer id to reply_message and keeps the content here.
+
+    Args:
+        mod: Loaded MavenMCP module.
+
+    Returns:
+        Dict filled with content and composer_id when a reply script runs.
+    """
+    real = mod._run_applescript
+    captured = {}
+
+    def wrapped(script, timeout=60, argv=None):
+        """Run script, and capture reply content when this is a reply."""
+        probe_script = script
+        if "set _comp to reply" in script and "    end transaction" in script:
+            probe_script = script.replace(
+                "    end transaction",
+                "        set _mcpProbe to content of _comp as string\n    end transaction",
+                1,
+            )
+            probe_script = probe_script.replace(
+                "    return _id",
+                f'    return _id & linefeed & "{PROBE}" & linefeed & _mcpProbe',
+                1,
+            )
+        raw = real(probe_script, timeout=timeout, argv=argv)
+        marker = "\n" + PROBE + "\n"
+        if marker in raw:
+            composer_id, _, content = raw.partition(marker)
+            captured["content"] = content
+            captured["composer_id"] = composer_id.strip()
+            return composer_id.strip()
+        return raw
+
+    mod._run_applescript = wrapped
+    return captured
 
 
 try:
@@ -112,8 +197,14 @@ missing_params = [name for name in REQUIRED if name not in params]
 if missing_params:
     done("missing", 1, "missing parameters: " + ", ".join(missing_params))
 
-if '"> "' not in source or "wrote:" not in source:
-    done("missing", 1, "reply quote is not the > form")
+try:
+    origin = inspect.getsource(fn)
+except Exception as exc:
+    done("mismatch", 2, f"cannot read reply_message source: {exc!r}")
+if "_bodyText & linefeed & linefeed" not in origin or "argv=body_lines" not in origin:
+    done("missing", 1, "reply body is not passed as argv and joined with linefeed")
+if INDENT not in origin:
+    done("missing", 1, "reply_message does not indent the quoted original")
 
 if os.environ.get("ENABLE_SENDING", "").lower() == "true":
     done("mismatch", 2, "ENABLE_SENDING is set; check_reply will not run a send path")
@@ -136,37 +227,44 @@ if not recent:
     done("mismatch", 2, "inbox is empty")
 
 identifier = int(recent[0]["identifier"])
-cases = (
-    ("empty line", "első\n\nmásodik", "első\n\nmásodik"),
-    ("trailing newline", "vége\n", "vége\n"),
-    ("quote and backslash", 'mondta "x" és \\y', 'mondta "x" és \\y'),
-    ("literal newline", "sor1\\nsor2", "sor1\nsor2"),
-    ("accent and emoji", "őűŐŰ 😀", "őűŐŰ 😀"),
-    ("crlf input", "sor1\r\nsor2", "sor1\nsor2"),
-)
+captured = install_probe(mod)
 
 try:
-    before = window_count()
+    before = mail_snapshot()
 except Exception as exc:
-    done("mismatch", 2, f"window count failed: {exc!r}")
+    done("mismatch", 2, f"snapshot failed: {exc!r}")
 
-for label, raw_body, expected in cases:
-    try:
-        result = fn(identifier=identifier, body=raw_body, show_window=False, send=False)
-    except Exception as exc:
-        done("mismatch", 2, f"{label} failed: {exc!r}")
-    if result.get("sent"):
-        done("mismatch", 2, f"{label} reported sent")
-    if result.get("normalizedBody") != expected:
-        done("mismatch", 2, f"{label} normalized body differs")
-    if "\r" in result.get("normalizedBody", ""):
-        done("mismatch", 2, f"{label} still contains CR")
+body = "\n".join(BODY_LINES)
+try:
+    result = fn(identifier=identifier, body=body, show_window=False, send=False)
+except Exception as exc:
+    done("mismatch", 2, f"reply_message failed: {exc!r}")
+
+if result.get("sent"):
+    done("mismatch", 2, "reply reported sent")
+if not result.get("composerId"):
+    done("mismatch", 2, "no composerId")
+if "content" not in captured:
+    done("mismatch", 2, "composer content was not read back")
+
+lines = as_lines(captured["content"])
+received = lines[:len(BODY_LINES)]
+if received != list(BODY_LINES):
+    done("mismatch", 2, "body lines differ: " + repr(received))
+rest = lines[len(BODY_LINES):]
+if not rest or rest[0] != "":
+    done("mismatch", 2, "missing the single blank line before the quote")
+if len(rest) > 1 and rest[1] == "":
+    done("mismatch", 2, "double blank line before the quote")
+quoted = [line for line in rest[1:] if line.strip()]
+if not quoted or any(not line.startswith(INDENT) for line in quoted):
+    done("mismatch", 2, "quoted original is not indented by four spaces")
 
 try:
-    after = window_count()
+    after = mail_snapshot()
 except Exception as exc:
-    done("mismatch", 2, f"window count failed: {exc!r}")
+    done("mismatch", 2, f"snapshot failed: {exc!r}")
 if after != before:
-    done("mismatch", 2, "reply opened or closed a window")
+    done("mismatch", 2, f"composer, window, or draft count changed {before} -> {after}")
 
-done("ok", 0, f"identifier={identifier} cases={len(cases)}")
+done("ok", 0, f"identifier={identifier} lines={len(BODY_LINES)}")
