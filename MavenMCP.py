@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from typing import Any
 
@@ -1279,7 +1280,211 @@ def forward_message(
     }
 
 
-# PAGOCS-PATCH: reply v1
+def _normalize_reply_body(text: str) -> str:
+    """Normalize a caller-supplied reply body to LF-only text.
+
+    NUL bytes are removed. CRLF and a bare CR become LF. A literal
+    backslash followed by ``n`` becomes a real LF. Original message text
+    does not pass through this literal-backslash replacement.
+
+    Args:
+        text: Reply body as supplied by the caller.
+
+    Returns:
+        The normalized body. It may be empty.
+    """
+    text = text.replace("\x00", "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\\n", "\n")
+    return text
+
+
+def _normalize_lf(text: str) -> str:
+    """Turn stored message text into LF-only text without other edits.
+
+    Args:
+        text: Text read from MailMaven or from a UTF-8 file.
+
+    Returns:
+        The same characters, with CRLF and CR written as LF.
+    """
+    return text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _reply_quote(original: str, when: str, who: str) -> str:
+    """Build the quoted original used when MailMaven did not prefill one.
+
+    Args:
+        original: Original message body, already LF-normalized.
+        when: Date text from the message.
+        who: Sender text from the message.
+
+    Returns:
+        An LF-only block starting with ``On <date>, <sender> wrote:``.
+        Every original line is prefixed with ``> ``.
+    """
+    who = who.strip()
+    if who.endswith(","):
+        who = who[:-1].strip()
+    if not who:
+        who = "sender"
+    when = when.strip() or "unknown date"
+    quoted = "\n".join("> " + line for line in original.split("\n"))
+    return f"On {when}, {who} wrote:\n{quoted}"
+
+
+def _join_reply_parts(body: str, rest: str) -> str:
+    """Join the reply body and the quoted part with a blank LF line.
+
+    Args:
+        body: Normalized reply body.
+        rest: Quoted original, or text MailMaven already put on the composer.
+
+    Returns:
+        The single composer body. An empty body leaves only ``rest``.
+    """
+    if body == "":
+        return rest
+    if rest == "":
+        return body
+    return body + "\n\n" + rest
+
+
+def _write_utf8(path: str, text: str) -> None:
+    """Write text as UTF-8 with the LF bytes already present in ``text``.
+
+    Args:
+        path: Destination path.
+        text: LF-normalized text. No newline is added.
+    """
+    with open(path, "wb") as handle:
+        handle.write(text.encode("utf-8"))
+
+
+def _read_utf8(path: str) -> str:
+    """Read a UTF-8 file without stripping any character.
+
+    Args:
+        path: Source path.
+
+    Returns:
+        The file text, including a trailing LF when the file has one.
+    """
+    with open(path, "rb") as handle:
+        return handle.read().decode("utf-8")
+
+
+def _chop_one_newline(text: str) -> str:
+    """Drop one trailing LF from osascript's stdout.
+
+    Args:
+        text: Raw stdout.
+
+    Returns:
+        ``text`` without a single final LF. Other whitespace stays.
+    """
+    if text.endswith("\n"):
+        return text[:-1]
+    return text
+
+
+def _run_osascript_stdin(script: str, args: list[str], timeout: int = 60) -> str:
+    """Run an AppleScript from stdin with argv, so the body stays out of the source.
+
+    Args:
+        script: AppleScript source. It must start with ``on run argv``.
+        args: Arguments after ``osascript -``. They become ``argv``.
+        timeout: Seconds before the process is killed.
+
+    Returns:
+        Stdout with one trailing LF removed.
+
+    Raises:
+        RuntimeError: osascript exited non-zero.
+    """
+    proc = subprocess.run(
+        ["osascript", "-", *args],
+        input=script,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        msg = proc.stderr.strip().replace("\n", " ")
+        raise RuntimeError(f"AppleScript error: {msg}")
+    return _chop_one_newline(proc.stdout)
+
+
+def _read_original_body(identifier: int) -> str:
+    """Read one message body as LF text through a UTF-8 file.
+
+    ``get_message`` returns fields separated by CR, so a multi-line body
+    cannot travel that way. The body is written as UTF-8 and read back here.
+
+    Args:
+        identifier: Integer MailMaven message id.
+
+    Returns:
+        The original body, LF-normalized. Empty when MailMaven has none.
+    """
+    script = r'''
+on run argv
+    set msgId to item 1 of argv as integer
+    set outPath to item 2 of argv
+    tell application "MailMaven"
+        try
+            set m to message id msgId
+        on error
+            error "Message not found"
+        end try
+        set rawText to ""
+        try
+            set rawText to content of m as string
+        end try
+        if rawText is "missing value" then set rawText to ""
+    end tell
+    set rawText to my asLF(rawText)
+    my writeUTF8(outPath, rawText)
+    return "ok"
+end run
+
+on asLF(txt)
+    set previousDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to linefeed
+    set pieces to paragraphs of txt
+    set joined to pieces as text
+    set AppleScript's text item delimiters to previousDelimiters
+    return joined
+end asLF
+
+on writeUTF8(posixPath, txt)
+    set fileRef to missing value
+    try
+        set fileRef to open for access (POSIX file posixPath) with write permission
+        set eof of fileRef to 0
+        write txt to fileRef as «class utf8»
+        close access fileRef
+    on error errMsg number errNum
+        try
+            if fileRef is not missing value then close access fileRef
+        end try
+        error errMsg number errNum
+    end try
+end writeUTF8
+'''
+    fd, out_path = tempfile.mkstemp(prefix="mailmaven-reply-orig-", suffix=".txt")
+    os.close(fd)
+    try:
+        _run_osascript_stdin(script, [str(identifier), out_path])
+        return _normalize_lf(_read_utf8(out_path))
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+# PAGOCS-PATCH: reply v2
 @mcp.tool()
 def reply_message(
     identifier: int,
@@ -1292,30 +1497,40 @@ def reply_message(
 ) -> dict:
     """Reply to an existing message.
 
-    MailMaven fills the recipients: the sender, or every recipient when
-    ``reply_to_all`` is true. The optional body is placed above the quoted
-    original. The reply composer is created inside a ``with transaction``
-    block, and the message lookup stays in that same block.
+    MailMaven's ``reply`` command (MailMaven.sdef, code ``emsg_rep``) takes
+    the message, optional ``reply to all``, ``from``, and ``using template``.
+    The reply text is never placed in the AppleScript source. It is
+    normalized in Python and read from a UTF-8 file. A literal backslash
+    followed by ``n`` in ``body`` becomes a real line break. Line endings
+    in the composer body are LF. The quoted original is built here: each
+    line is prefixed with ``> `` under an ``On <date>, <sender> wrote:``
+    line. If the new composer already has readable content, that content is
+    kept and the reply text is placed above it instead.
 
     Args:
         identifier: The message's integer identifier.
-        body: Reply text placed above the quoted original (optional).
-            Each line of the original is indented by four spaces.
+        body: Reply text placed above the quote (optional).
         reply_to_all: Reply to every recipient. Default is the sender only.
         from_account: Account name or address to send from (optional).
         template_name: Name of a reply template from ``list_templates``
             (optional). The match is the template's name, type reply.
         show_window: Show composer in MailMaven (default True). Ignored if
             ``send`` is True, since a message cannot be sent via AppleScript
-            once its composer window has been shown.
+            once its composer window has been shown. When neither show nor
+            send is requested, the composer is deleted without saving after
+            the content check.
         send: If True, sends the reply immediately via AppleScript instead
             of showing the composer. Default is False. Requires
             ``from_account`` to be set — MailMaven cannot send a message
             without an explicit from address.
 
     Returns:
-        Dict with composerId, whether the message was sent, and a
-        confirmation message.
+        Dict with composerId, sent, normalizedBody, and a confirmation
+        message. ``normalizedBody`` is the reply text after LF normalization.
+
+    Raises:
+        RuntimeError: The text read back from the composer does not match
+            the text that was set.
     """
     if send and os.environ.get("ENABLE_SENDING", "").lower() != "true":
         raise ValueError(
@@ -1329,98 +1544,192 @@ def reply_message(
             "send a message without an explicit from address."
         )
 
-    # Labeled parameters go through `given` because the dictionary name
-    # `reply to all` is three words. Account names resolve as `account "…"`.
-    # An address (anything containing "@") is passed as text.
-    given_parts = [f"reply to all:{'true' if reply_to_all else 'false'}"]
-    if from_account:
-        if "@" in from_account:
-            given_parts.append(f"from:{_to_applescript(from_account)}")
+    normalized = _normalize_reply_body(body)
+    message = get_message(identifier, include_content=False)
+    original = _read_original_body(identifier)
+    quote = _reply_quote(original, str(message.get("dateReceived", "")), str(message.get("senders", "")))
+    full_text = _join_reply_parts(normalized, quote)
+
+    # The reply command's parameters travel as argv. The body files are the
+    # only place the reply text exists. ``return`` below is the AppleScript
+    # statement; the body itself uses ``linefeed`` (LF) only.
+    script = r'''
+on run argv
+    set bodyPath to item 1 of argv
+    set fullPath to item 2 of argv
+    set existingPath to item 3 of argv
+    set readbackPath to item 4 of argv
+    set modePath to item 5 of argv
+    set msgId to item 6 of argv as integer
+    set replyAll to (item 7 of argv) is "true"
+    set fromAcct to item 8 of argv
+    set templateName to item 9 of argv
+    set actionName to item 10 of argv
+    set bodyText to my asLF(my readUTF8(bodyPath))
+    set fullText to my asLF(my readUTF8(fullPath))
+    tell application "MailMaven"
+        with transaction
+            try
+                set _msg to message id msgId
+            on error
+                error "Message not found"
+            end try
+            if templateName is not "" then
+                set _tmpls to every reply template whose name is templateName
+                if (count of _tmpls) is 0 then error "Reply template not found"
+                set _tmpl to item 1 of _tmpls
+            end if
+            if templateName is "" and fromAcct is "" then
+                set _comp to reply _msg given reply to all:replyAll
+            else if templateName is "" and fromAcct contains "@" then
+                set _comp to reply _msg given reply to all:replyAll, from:fromAcct
+            else if templateName is "" then
+                set _comp to reply _msg given reply to all:replyAll, from:(account fromAcct)
+            else if fromAcct is "" then
+                set _comp to reply _msg given reply to all:replyAll, using template:_tmpl
+            else if fromAcct contains "@" then
+                set _comp to reply _msg given reply to all:replyAll, from:fromAcct, using template:_tmpl
+            else
+                set _comp to reply _msg given reply to all:replyAll, from:(account fromAcct), using template:_tmpl
+            end if
+            set existingText to ""
+            set prefilled to false
+            try
+                set existingText to content of _comp as string
+            end try
+            if existingText is "missing value" then set existingText to ""
+            if existingText is not "" then
+                set existingText to my asLF(existingText)
+                set prefilled to true
+            end if
+            if prefilled then
+                set intended to my joinParts(bodyText, existingText)
+                my writeUTF8(modePath, "prefilled")
+                my writeUTF8(existingPath, existingText)
+            else
+                set intended to fullText
+                my writeUTF8(modePath, "built")
+                my writeUTF8(existingPath, "")
+            end if
+            set content of _comp to intended
+            set readback to my asLF(content of _comp as string)
+            my writeUTF8(readbackPath, readback)
+            if readback is not intended then
+                try
+                    delete _comp
+                end try
+                error "reply content mismatch"
+            end if
+            set _id to identifier of _comp
+            set sentFlag to "false"
+            if actionName is "send" then
+                set didSend to send _comp
+                if didSend then set sentFlag to "true"
+            else if actionName is "show" then
+                show composer _comp
+            else
+                delete _comp
+            end if
+        end transaction
+        return _id & "|" & sentFlag
+    end tell
+end run
+
+on readUTF8(posixPath)
+    try
+        return read (POSIX file posixPath) as «class utf8»
+    on error
+        return ""
+    end try
+end readUTF8
+
+on asLF(txt)
+    set previousDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to linefeed
+    set pieces to paragraphs of txt
+    set joined to pieces as text
+    set AppleScript's text item delimiters to previousDelimiters
+    return joined
+end asLF
+
+on joinParts(bodyText, restText)
+    if bodyText is "" then return restText
+    if restText is "" then return bodyText
+    return bodyText & linefeed & linefeed & restText
+end joinParts
+
+on writeUTF8(posixPath, txt)
+    set fileRef to missing value
+    try
+        set fileRef to open for access (POSIX file posixPath) with write permission
+        set eof of fileRef to 0
+        write txt to fileRef as «class utf8»
+        close access fileRef
+    on error errMsg number errNum
+        try
+            if fileRef is not missing value then close access fileRef
+        end try
+        error errMsg number errNum
+    end try
+end writeUTF8
+'''
+    paths: list[str] = []
+    try:
+        for prefix in ("body", "full", "existing", "readback", "mode"):
+            fd, temp_path = tempfile.mkstemp(prefix=f"mailmaven-reply-{prefix}-", suffix=".txt")
+            os.close(fd)
+            paths.append(temp_path)
+        body_path, full_path, existing_path, readback_path, mode_path = paths
+        _write_utf8(body_path, normalized)
+        _write_utf8(full_path, full_text)
+        action = "send" if send else "show" if show_window else "discard"
+        raw = _run_osascript_stdin(
+            script,
+            [
+                body_path,
+                full_path,
+                existing_path,
+                readback_path,
+                mode_path,
+                str(identifier),
+                "true" if reply_to_all else "false",
+                from_account or "",
+                template_name or "",
+                action,
+            ],
+        )
+        mode = _read_utf8(mode_path)
+        if mode.endswith("\n"):
+            mode = mode[:-1]
+        readback = _normalize_lf(_read_utf8(readback_path))
+        if mode == "prefilled":
+            expected = _join_reply_parts(normalized, _normalize_lf(_read_utf8(existing_path)))
+        elif mode == "built":
+            expected = full_text
         else:
-            given_parts.append(f"from:account {_to_applescript(from_account)}")
-    template_block = ""
-    if template_name:
-        template_block = (
-            "\n        set _tmpls to every reply template whose name is "
-            f"{_to_applescript(template_name)}"
-            '\n        if (count of _tmpls) is 0 then error "Reply template not found"'
-        )
-        given_parts.append("using template:(item 1 of _tmpls)")
-    given_clause = " given " + ", ".join(given_parts)
+            raise RuntimeError(f"reply content mode unknown: {mode!r}")
+        if readback != expected:
+            raise RuntimeError("reply content mismatch")
+    finally:
+        for temp_path in paths:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
-    # The new composer's content property is missing value, and it does not
-    # coerce for concatenation. MailMaven also does not append its own quote
-    # after content is set. Copy the source message text, indent every line
-    # by four spaces, and place the reply above it. An empty body leaves
-    # content unset so MailMaven's own quote and signature stay in the window.
-    content_line = ""
-    if body:
-        content_line = (
-            '\n        set _orig to ""'
-            "\n        try"
-            "\n            set _orig to content of item 1 of _msgs as string"
-            "\n        end try"
-            '\n        if _orig is "missing value" then set _orig to ""'
-            "\n        set _oldDelims to AppleScript's text item delimiters"
-            "\n        try"
-            "\n            set AppleScript's text item delimiters to return & linefeed"
-            "\n            set _parts to text items of _orig"
-            "\n            set AppleScript's text item delimiters to return"
-            "\n            set _orig to _parts as string"
-            "\n            set AppleScript's text item delimiters to linefeed"
-            "\n            set _parts to text items of _orig"
-            "\n            set AppleScript's text item delimiters to return"
-            "\n            set _orig to _parts as string"
-            "\n            set _lines to text items of _orig"
-            "\n            set _quotedLines to {}"
-            "\n            repeat with _line in _lines"
-            '\n                set end of _quotedLines to ("    " & _line)'
-            "\n            end repeat"
-            "\n            set _quoted to _quotedLines as string"
-            "\n            set AppleScript's text item delimiters to _oldDelims"
-            "\n        on error errMsg number errNum"
-            "\n            set AppleScript's text item delimiters to _oldDelims"
-            "\n            error errMsg number errNum"
-            "\n        end try"
-            "\n        set content of _comp to "
-            f"{_to_applescript(body)} & return & return & _quoted"
-        )
-
-    # Sending and showing are mutually exclusive: once a composer window is
-    # shown, MailMaven no longer allows it to be sent via AppleScript. If
-    # `send` is set, it takes priority and `show_window` is ignored.
+    composer_id, _, sent_flag = raw.partition("|")
+    sent = sent_flag == "true"
     if send:
-        action_line = '\n        set _sent to send _comp'
-        result_expr = '_id & "|" & (_sent as string)'
-    else:
-        action_line = '\n        show composer _comp' if show_window else ''
-        result_expr = '_id'
-
-    body_script = f'''
-    with transaction
-        {_message_lookup_snippet(identifier)}
-        if (count of _msgs) is 0 then error "Message not found"{template_block}
-        set _comp to reply item 1 of _msgs{given_clause}{content_line}
-        set _id to identifier of _comp{action_line}
-    end transaction
-    '''
-    body_script += f'\n    return {result_expr}'
-
-    script = _tell(body_script)
-    raw = _run_applescript(script)
-
-    if send:
-        composer_id, _, sent_flag = raw.partition("|")
-        sent = sent_flag.strip().lower() == "true"
         status = "sent" if sent else "created but send reported failure"
+    elif show_window:
+        status = "shown"
     else:
-        composer_id = raw
-        sent = False
-        status = "shown" if show_window else "created"
+        status = "checked and discarded"
 
     return {
         "composerId": composer_id,
         "sent": sent,
+        "normalizedBody": normalized,
         "message": f"Reply to message id {identifier}. Composer {status}.",
     }
 
