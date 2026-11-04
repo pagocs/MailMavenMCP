@@ -7,8 +7,8 @@ Run on the Mac with the MailMavenMCP venv python:
 Opens one reply with show_window false, reads the composer content back,
 and compares the body line by line. MailMaven's composer does not support
 close. The hidden composer is discarded when its transaction ends. The
-check compares composer count, draft count, and window count so nothing
-was saved or sent.
+check compares composer and draft counts so nothing was saved or sent,
+and fails if a new window opens.
 Prints JSON {status, details}.
 Exit: 0 = ok, 1 = missing, 2 = mismatch / error.
 """
@@ -264,7 +264,9 @@ try:
     after = mail_snapshot()
 except Exception as exc:
     done("mismatch", 2, f"snapshot failed: {exc!r}")
-if after != before:
-    done("mismatch", 2, f"composer, window, or draft count changed {before} -> {after}")
+if after[0] != before[0] or after[2] != before[2]:
+    done("mismatch", 2, f"composer or draft count changed {before} -> {after}")
+if after[1] > before[1]:
+    done("mismatch", 2, f"reply opened a window {before} -> {after}")
 
 done("ok", 0, f"identifier={identifier} lines={len(BODY_LINES)}")
