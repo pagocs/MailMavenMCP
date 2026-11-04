@@ -106,6 +106,21 @@ QUALIFIER_LESS = ASConst("less")
 
 UNIT_DAY = ASConst("day")
 
+# PAGOCS-PATCH: review-date-filter v1
+SORT_CONSTANTS = {
+    "date received": ASConst("sort by date received"),
+    "review date": ASConst("sort by review date"),
+}
+
+
+def _as_date_literal(iso: str) -> ASConst:
+    """ISO date string -> AppleScript date literal (same style as set_review_date)."""
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        raise ValueError(f"Invalid date format: {iso}. Use ISO format like '2025-12-25'.")
+    return ASConst(dt.strftime('date "%A, %B %d, %Y"'))
+
 FLAG_CONSTANTS = {
     "no flag": ASConst("no flag"),
     "red": ASConst("red"),
@@ -445,6 +460,15 @@ def search_messages(
     account_name: str | None = None,
     limit: int = DEFAULT_LIMIT,
     include_content: bool = False,
+    # PAGOCS-PATCH: review-date-filter v1 (new params, all optional / backward compatible)
+    review_overdue: bool | None = None,
+    review_due_within_days: int | None = None,
+    review_start_days_back: int | None = None,
+    review_length_days: int | None = None,
+    review_date_from: str | None = None,
+    review_date_to: str | None = None,
+    sort_by: str | None = None,
+    sort_ascending: bool | None = None,
 ) -> list[dict]:
     """Search for messages using MailMaven's query/criteria system.
 
@@ -469,8 +493,24 @@ def search_messages(
         account_name: Restrict to a named account.
         limit: Max messages to return (default 50, hard cap 500).
         include_content: Include full body text (default False).
+        review_overdue: True = only messages whose review (Due/tickler) date
+            is before today (overdue).
+        review_due_within_days: Only messages with a review date from today
+            through N days ahead.
+        review_start_days_back: Relative review-date window start, N days
+            ago (negative = in the future). Use with review_length_days.
+        review_length_days: Length of the relative review-date window in days.
+        review_date_from: ISO date (e.g. "2025-12-01"); review date on/after.
+        review_date_to: ISO date (e.g. "2025-12-31"); review date on/before.
+        sort_by: "date received" (default) or "review date".
+        sort_ascending: Sort ascending (default False = newest first).
     """
+    # PAGOCS-PATCH: review-date-filter v1
     limit = max(1, min(limit, MAX_LIMIT))
+    sort_by = sort_by or "date received"
+    if sort_by not in SORT_CONSTANTS:
+        raise ValueError(f"Invalid sort_by '{sort_by}'. Must be one of: {', '.join(sorted(SORT_CONSTANTS))}")
+    sort_asc_lit = "true" if sort_ascending else "false"
 
     crit_lines: list[str] = []
 
@@ -525,6 +565,33 @@ def search_messages(
             "starting at": -days_back,
             "for duration": days_back,
         })
+    # PAGOCS-PATCH: review-date-filter v1 - review (Due) date criteria
+    if review_overdue:
+        # everything with a review date up to yesterday (tested on MailMaven)
+        add_criterion("relative review date criterion", {
+            "unit": UNIT_DAY,
+            "starting at": -3650,
+            "for duration": 3650,
+        })
+    if review_due_within_days is not None and review_due_within_days >= 0:
+        add_criterion("relative review date criterion", {
+            "unit": UNIT_DAY,
+            "starting at": 0,
+            "for duration": review_due_within_days + 1,
+        })
+    if review_start_days_back is not None and review_length_days is not None:
+        add_criterion("relative review date criterion", {
+            "unit": UNIT_DAY,
+            "starting at": -review_start_days_back,
+            "for duration": review_length_days,
+        })
+    if review_date_from or review_date_to:
+        rprops: dict[str, Any] = {}
+        if review_date_from:
+            rprops["start date"] = _as_date_literal(review_date_from)
+        if review_date_to:
+            rprops["end date"] = _as_date_literal(review_date_to)
+        add_criterion("review date criterion", rprops)
     if mailbox_name:
         add_criterion("mailbox criterion", {"qualifier": QUALIFIER_EQUALS_TO, "mailbox": mailbox_name})
     if account_name:
@@ -554,8 +621,8 @@ def search_messages(
     with transaction
         set _q to make new query with properties {{name:"mcp_query"}}
         set logic of _q to all criteria
-        set sort order of _q to sort by date received
-        set sort ascending of _q to false
+        set sort order of _q to {SORT_CONSTANTS[sort_by].name}
+        set sort ascending of _q to {sort_asc_lit}
         {criteria_block}
 
         set _msgs to messages of _q
@@ -723,6 +790,30 @@ def get_recent_messages(
     """
     return search_messages(
         mailbox_name=mailbox_name,
+        limit=limit,
+        include_content=include_content,
+    )
+
+
+# PAGOCS-PATCH: review-date-filter v1
+@mcp.tool()
+def get_overdue_messages(
+    limit: int = 50,
+    account_name: str | None = None,
+    include_content: bool = False,
+) -> list[dict]:
+    """Get messages whose review (Due/tickler) date is before today, oldest due first.
+
+    Args:
+        limit: Max messages (default 50, max 500).
+        account_name: Restrict to a named account.
+        include_content: Include body text (default False).
+    """
+    return search_messages(
+        review_overdue=True,
+        sort_by="review date",
+        sort_ascending=True,
+        account_name=account_name,
         limit=limit,
         include_content=include_content,
     )
