@@ -90,7 +90,8 @@ except Exception as e:
 if p.returncode != 0:
     done("mismatch", 2, f"osascript error: {p.stderr.strip()}")
 direct = []
-for line in p.stdout.strip("\r\n").split("\r"):
+text = p.stdout.replace("\r\n", "\n").replace("\r", "\n")
+for line in text.split("\n"):
     if line.strip():
         s, _, d = line.partition("\t")
         direct.append((s, d.strip()))
