@@ -1423,7 +1423,7 @@ def forward_message(
 def reply_message(
     identifier: int,
     body: str = "",
-    reply_to_all: bool = False,
+    reply_to_all: bool = True,
     from_account: str | None = None,
     template_name: str | None = None,
     show_window: bool = True,
@@ -1431,9 +1431,9 @@ def reply_message(
 ) -> dict:
     """Reply to an existing message.
 
-    MailMaven fills the recipients: the sender, or every recipient when
-    ``reply_to_all`` is true. The optional body is placed above the quoted
-    original. The reply composer is created inside a ``with transaction``
+    MailMaven fills the recipients. By default that is reply to all. Pass
+    ``reply_to_all`` false to answer the sender only. The optional body is
+    the reply text. The reply composer is created inside a ``with transaction``
     block, and the message lookup stays in that same block.
 
     Args:
@@ -1443,7 +1443,8 @@ def reply_message(
             quote, a backslash, or an accent is not reinterpreted. A trailing
             newline does not add a blank line. The original message is not
             copied in; MailMaven's reply keeps its own quote.
-        reply_to_all: Reply to every recipient. Default is the sender only.
+        reply_to_all: Reply to every recipient. Default is true. Pass false
+            to answer the sender only.
         from_account: Account name or address to send from (optional).
         template_name: Name of a reply template from ``list_templates``
             (optional). The match is the template's name, type reply.
