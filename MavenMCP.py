@@ -154,14 +154,20 @@ def _to_applescript(val: Any) -> str:
     raise TypeError(f"Cannot convert {type(val)} to AppleScript")
 
 
+# PAGOCS-PATCH: tsv-fix v1
 def safe_str_handler() -> str:
-    """AppleScript handler that safely converts any value to a string."""
+    """AppleScript handler that converts a value to one TSV field.
+
+    Tab, carriage return, and linefeed become spaces so a notes or subject
+    value cannot split a row. Text item delimiters are restored before the
+    handler returns.
+    """
     return """
 on safeStr(v)
     try
         if v is missing value then return ""
         if class of v is date then
-            return (v as string)
+            return my flattenField(v as string)
         end if
         if class of v is list then
             set _out to ""
@@ -173,11 +179,27 @@ on safeStr(v)
             end if
             return ""
         end if
-        return v as string
+        return my flattenField(v as string)
     on error
         return ""
     end try
 end safeStr
+
+-- Tab, CR, and LF would split a TSV row. Replace each with a space.
+on flattenField(s)
+    set _oldDelims to AppleScript's text item delimiters
+    try
+        set AppleScript's text item delimiters to {tab, return, linefeed}
+        set _parts to text items of s
+        set AppleScript's text item delimiters to " "
+        set _flat to _parts as string
+        set AppleScript's text item delimiters to _oldDelims
+        return _flat
+    on error errMsg number errNum
+        set AppleScript's text item delimiters to _oldDelims
+        error errMsg number errNum
+    end try
+end flattenField
 """
 
 
@@ -320,12 +342,16 @@ def list_accounts() -> list[dict]:
 @mcp.tool()
 def list_mailboxes(account_name: str | None = None) -> list[dict]:
     """List mailboxes for a specific account, or all mailboxes if no account given."""
+    # name of an account specifier does not coerce inside `&` (-1700).
+    # safeStr does the coercion, and it is hoisted so a large account
+    # does not repeat it once per mailbox.
     if account_name:
         body = f'''
         set _out to ""
-        set _acct to first account whose name is "{account_name}"
+        set _acct to first account whose name is {_to_applescript(account_name)}
+        set _acctName to my safeStr(name of _acct)
         repeat with mb in mailboxes of _acct
-            set _out to _out & (my safeStr(name of mb)) & "\\t" & (my safeStr(path of mb)) & "\\t" & (name of _acct) & "\\n"
+            set _out to _out & (my safeStr(name of mb)) & "\\t" & (my safeStr(path of mb)) & "\\t" & _acctName & "\\n"
         end repeat
         return _out
         '''
@@ -335,7 +361,7 @@ def list_mailboxes(account_name: str | None = None) -> list[dict]:
         repeat with mb in mailboxes
             set _acctName to ""
             try
-                set _acctName to name of account of mb
+                set _acctName to my safeStr(name of account of mb)
             end try
             set _out to _out & (my safeStr(name of mb)) & "\\t" & (my safeStr(path of mb)) & "\\t" & _acctName & "\\n"
         end repeat
