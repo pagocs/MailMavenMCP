@@ -27,7 +27,7 @@ Once connected, Claude gains numerous tools for working with MailMaven:
 - `move_message`, `delete_message`
 
 **Composing**
-- `compose_message`, `forward_message`
+- `compose_message`, `forward_message`, `reply_message`
 - `list_signatures`, `list_templates`
 
 **Archiving**
