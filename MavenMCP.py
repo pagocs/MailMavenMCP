@@ -26,10 +26,32 @@ MAX_LIMIT = 500
 # AppleScript bridge
 # ---------------------------------------------------------------------------
 
-def _run_applescript(script: str, timeout: int = 60) -> str:
-    """Execute an AppleScript string via osascript and return its text output."""
+def _run_applescript(
+    script: str,
+    timeout: int = 60,
+    argv: list[str] | None = None,
+) -> str:
+    """Execute an AppleScript string via osascript and return its text output.
+
+    Args:
+        script: AppleScript source. When ``argv`` is set the script must
+            declare ``on run argv``.
+        timeout: Seconds before the process is killed.
+        argv: Strings passed after ``--``. They are not AppleScript string
+            literals, so quotes, backslashes, and accents stay intact.
+
+    Returns:
+        stdout with surrounding whitespace removed.
+
+    Raises:
+        RuntimeError: osascript failed.
+    """
+    command = ["osascript", "-l", "AppleScript", "-e", script]
+    if argv is not None:
+        command.append("--")
+        command.extend(argv)
     proc = subprocess.run(
-        ["osascript", "-l", "AppleScript", "-e", script],
+        command,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -1393,6 +1415,176 @@ def forward_message(
         "composerId": composer_id,
         "sent": sent,
         "message": f"Forwarded message id {identifier} to {to}. Composer {status}.",
+    }
+
+
+# PAGOCS-PATCH: reply v1
+@mcp.tool()
+def reply_message(
+    identifier: int,
+    body: str = "",
+    reply_to_all: bool = False,
+    from_account: str | None = None,
+    template_name: str | None = None,
+    show_window: bool = True,
+    send: bool = False,
+) -> dict:
+    """Reply to an existing message.
+
+    MailMaven fills the recipients: the sender, or every recipient when
+    ``reply_to_all`` is true. The optional body is placed above the quoted
+    original. The reply composer is created inside a ``with transaction``
+    block, and the message lookup stays in that same block.
+
+    Args:
+        identifier: The message's integer identifier.
+        body: Reply text placed above the quoted original (optional).
+            Real line breaks stay line breaks. The lines are osascript
+            arguments joined with linefeed, so a quote, a backslash, or an
+            accent is not reinterpreted. A trailing newline does not add a
+            blank line. Each line of the original is indented by four spaces.
+        reply_to_all: Reply to every recipient. Default is the sender only.
+        from_account: Account name or address to send from (optional).
+        template_name: Name of a reply template from ``list_templates``
+            (optional). The match is the template's name, type reply.
+        show_window: Show composer in MailMaven (default True). Ignored if
+            ``send`` is True, since a message cannot be sent via AppleScript
+            once its composer window has been shown.
+        send: If True, sends the reply immediately via AppleScript instead
+            of showing the composer. Default is False. Requires
+            ``from_account`` to be set — MailMaven cannot send a message
+            without an explicit from address.
+
+    Returns:
+        Dict with composerId, whether the message was sent, and a
+        confirmation message.
+    """
+    if send and os.environ.get("ENABLE_SENDING", "").lower() != "true":
+        raise ValueError(
+            "Sending is disabled — set the ENABLE_SENDING environment "
+            "variable to 'true' to allow reply_message to send mail."
+        )
+
+    if send and not from_account:
+        raise ValueError(
+            "from_account is required when send=True — MailMaven cannot "
+            "send a message without an explicit from address."
+        )
+
+    # Labeled parameters go through `given` because the dictionary name
+    # `reply to all` is three words. Account names resolve as `account "…"`.
+    # An address (anything containing "@") is passed as text.
+    given_parts = [f"reply to all:{'true' if reply_to_all else 'false'}"]
+    if from_account:
+        if "@" in from_account:
+            given_parts.append(f"from:{_to_applescript(from_account)}")
+        else:
+            given_parts.append(f"from:account {_to_applescript(from_account)}")
+    template_block = ""
+    if template_name:
+        template_block = (
+            "\n        set _tmpls to every reply template whose name is "
+            f"{_to_applescript(template_name)}"
+            '\n        if (count of _tmpls) is 0 then error "Reply template not found"'
+        )
+        given_parts.append("using template:(item 1 of _tmpls)")
+    given_clause = " given " + ", ".join(given_parts)
+
+    # The new composer's content property is missing value, and it does not
+    # coerce for concatenation. MailMaven also does not append its own quote
+    # after content is set. Copy the source message text, indent every line
+    # by four spaces, and place the reply above it. An empty body leaves
+    # content unset so MailMaven's own quote and signature stay in the window.
+    # Body lines travel as argv and are joined with linefeed only. An
+    # AppleScript string would treat \n and \\ as escapes, and return plus
+    # linefeed would show up as a double blank line.
+    body_lines: list[str] = []
+    content_line = ""
+    if body:
+        body_lines = body.splitlines() or [""]
+        content_line = (
+            '\n        set _orig to ""'
+            "\n        try"
+            "\n            set _orig to content of item 1 of _msgs as string"
+            "\n        end try"
+            '\n        if _orig is "missing value" then set _orig to ""'
+            "\n        set _oldDelims to AppleScript's text item delimiters"
+            "\n        try"
+            "\n            set AppleScript's text item delimiters to return & linefeed"
+            "\n            set _parts to text items of _orig"
+            "\n            set AppleScript's text item delimiters to return"
+            "\n            set _orig to _parts as string"
+            "\n            set AppleScript's text item delimiters to linefeed"
+            "\n            set _parts to text items of _orig"
+            "\n            set AppleScript's text item delimiters to return"
+            "\n            set _orig to _parts as string"
+            "\n            set _lines to text items of _orig"
+            "\n            set _quotedLines to {}"
+            "\n            repeat with _line in _lines"
+            '\n                set end of _quotedLines to ("    " & _line)'
+            "\n            end repeat"
+            "\n            set _quoted to _quotedLines as string"
+            "\n            set AppleScript's text item delimiters to _oldDelims"
+            "\n        on error errMsg number errNum"
+            "\n            set AppleScript's text item delimiters to _oldDelims"
+            "\n            error errMsg number errNum"
+            "\n        end try"
+            "\n        set content of _comp to _bodyText & linefeed & linefeed & _quoted"
+        )
+
+    # Sending and showing are mutually exclusive: once a composer window is
+    # shown, MailMaven no longer allows it to be sent via AppleScript. If
+    # `send` is set, it takes priority and `show_window` is ignored.
+    if send:
+        action_line = '\n        set _sent to send _comp'
+        result_expr = '_id & "|" & (_sent as string)'
+    else:
+        action_line = '\n        show composer _comp' if show_window else ''
+        result_expr = '_id'
+
+    body_script = f'''
+    with transaction
+        {_message_lookup_snippet(identifier)}
+        if (count of _msgs) is 0 then error "Message not found"{template_block}
+        set _comp to reply item 1 of _msgs{given_clause}{content_line}
+        set _id to identifier of _comp{action_line}
+    end transaction
+    '''
+    body_script += f'\n    return {result_expr}'
+
+    if body_lines:
+        script = (
+            "on run argv\n"
+            "    set _bodyDelims to AppleScript's text item delimiters\n"
+            "    try\n"
+            "        set AppleScript's text item delimiters to linefeed\n"
+            "        set _bodyText to argv as string\n"
+            "        set AppleScript's text item delimiters to _bodyDelims\n"
+            "    on error errMsg number errNum\n"
+            "        set AppleScript's text item delimiters to _bodyDelims\n"
+            "        error errMsg number errNum\n"
+            "    end try\n"
+            + _tell(body_script)
+            + "\nend run"
+        )
+        raw = _run_applescript(script, argv=body_lines)
+    else:
+        script = _tell(body_script)
+        raw = _run_applescript(script)
+
+    if send:
+        composer_id, _, sent_flag = raw.partition("|")
+        sent = sent_flag.strip().lower() == "true"
+        status = "sent" if sent else "created but send reported failure"
+    else:
+        composer_id = raw
+        sent = False
+        status = "shown" if show_window else "created"
+
+    return {
+        "composerId": composer_id,
+        "sent": sent,
+        "message": f"Reply to message id {identifier}. Composer {status}.",
     }
 
 
