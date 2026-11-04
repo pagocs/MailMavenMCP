@@ -1438,11 +1438,11 @@ def reply_message(
 
     Args:
         identifier: The message's integer identifier.
-        body: Reply text placed above the quoted original (optional).
-            Real line breaks stay line breaks. The lines are osascript
-            arguments joined with linefeed, so a quote, a backslash, or an
-            accent is not reinterpreted. A trailing newline does not add a
-            blank line. Each line of the original is indented by four spaces.
+        body: Reply text (optional). Real line breaks stay line breaks.
+            The lines are osascript arguments joined with return, so a
+            quote, a backslash, or an accent is not reinterpreted. A trailing
+            newline does not add a blank line. The original message is not
+            copied in; MailMaven's reply keeps its own quote.
         reply_to_all: Reply to every recipient. Default is the sender only.
         from_account: Account name or address to send from (optional).
         template_name: Name of a reply template from ``list_templates``
@@ -1490,47 +1490,15 @@ def reply_message(
         given_parts.append("using template:(item 1 of _tmpls)")
     given_clause = " given " + ", ".join(given_parts)
 
-    # The new composer's content property is missing value, and it does not
-    # coerce for concatenation. MailMaven also does not append its own quote
-    # after content is set. Copy the source message text, indent every line
-    # by four spaces, and place the reply above it. An empty body leaves
-    # content unset so MailMaven's own quote and signature stay in the window.
-    # Body lines travel as argv and are joined with linefeed only. An
-    # AppleScript string would treat \n and \\ as escapes, and return plus
-    # linefeed would show up as a double blank line.
+    # Only the reply text is written. MailMaven's reply is left to keep its
+    # own quote and signature. Body lines travel as argv and are joined with
+    # return (CR) only. Linefeed is not mixed in. An empty body leaves
+    # content unset.
     body_lines: list[str] = []
     content_line = ""
     if body:
         body_lines = body.splitlines() or [""]
-        content_line = (
-            '\n        set _orig to ""'
-            "\n        try"
-            "\n            set _orig to content of item 1 of _msgs as string"
-            "\n        end try"
-            '\n        if _orig is "missing value" then set _orig to ""'
-            "\n        set _oldDelims to AppleScript's text item delimiters"
-            "\n        try"
-            "\n            set AppleScript's text item delimiters to return & linefeed"
-            "\n            set _parts to text items of _orig"
-            "\n            set AppleScript's text item delimiters to return"
-            "\n            set _orig to _parts as string"
-            "\n            set AppleScript's text item delimiters to linefeed"
-            "\n            set _parts to text items of _orig"
-            "\n            set AppleScript's text item delimiters to return"
-            "\n            set _orig to _parts as string"
-            "\n            set _lines to text items of _orig"
-            "\n            set _quotedLines to {}"
-            "\n            repeat with _line in _lines"
-            '\n                set end of _quotedLines to ("    " & _line)'
-            "\n            end repeat"
-            "\n            set _quoted to _quotedLines as string"
-            "\n            set AppleScript's text item delimiters to _oldDelims"
-            "\n        on error errMsg number errNum"
-            "\n            set AppleScript's text item delimiters to _oldDelims"
-            "\n            error errMsg number errNum"
-            "\n        end try"
-            "\n        set content of _comp to _bodyText & linefeed & linefeed & _quoted"
-        )
+        content_line = "\n        set content of _comp to _bodyText"
 
     # Sending and showing are mutually exclusive: once a composer window is
     # shown, MailMaven no longer allows it to be sent via AppleScript. If
@@ -1557,8 +1525,8 @@ def reply_message(
             "on run argv\n"
             "    set _bodyDelims to AppleScript's text item delimiters\n"
             "    try\n"
-            "        set AppleScript's text item delimiters to linefeed\n"
-            "        set _bodyText to argv as string\n"
+            "        set AppleScript's text item delimiters to return\n"
+            "        set _bodyText to argv as text\n"
             "        set AppleScript's text item delimiters to _bodyDelims\n"
             "    on error errMsg number errNum\n"
             "        set AppleScript's text item delimiters to _bodyDelims\n"

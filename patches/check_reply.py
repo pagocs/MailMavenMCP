@@ -36,7 +36,6 @@ BODY_LINES = (
     "",
     "Utolsó sor",
 )
-INDENT = "    "
 
 path = os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else "~/mcp/MailMavenMCP/MavenMCP.py")
 out = {"status": None, "details": ""}
@@ -201,10 +200,12 @@ try:
     origin = inspect.getsource(fn)
 except Exception as exc:
     done("mismatch", 2, f"cannot read reply_message source: {exc!r}")
-if "_bodyText & linefeed & linefeed" not in origin or "argv=body_lines" not in origin:
-    done("missing", 1, "reply body is not passed as argv and joined with linefeed")
-if INDENT not in origin:
-    done("missing", 1, "reply_message does not indent the quoted original")
+if "set content of _comp to _bodyText" not in origin or "argv=body_lines" not in origin:
+    done("missing", 1, "reply body is not passed as argv")
+if "text item delimiters to return" not in origin:
+    done("missing", 1, "reply lines are not joined with return")
+if '"    " & _line' in origin:
+    done("missing", 1, "reply still copies an indented original")
 
 if os.environ.get("ENABLE_SENDING", "").lower() == "true":
     done("mismatch", 2, "ENABLE_SENDING is set; check_reply will not run a send path")
@@ -251,14 +252,6 @@ lines = as_lines(captured["content"])
 received = lines[:len(BODY_LINES)]
 if received != list(BODY_LINES):
     done("mismatch", 2, "body lines differ: " + repr(received))
-rest = lines[len(BODY_LINES):]
-if not rest or rest[0] != "":
-    done("mismatch", 2, "missing the single blank line before the quote")
-if len(rest) > 1 and rest[1] == "":
-    done("mismatch", 2, "double blank line before the quote")
-quoted = [line for line in rest[1:] if line.strip()]
-if not quoted or any(not line.startswith(INDENT) for line in quoted):
-    done("mismatch", 2, "quoted original is not indented by four spaces")
 
 try:
     after = mail_snapshot()
