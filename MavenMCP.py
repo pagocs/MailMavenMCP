@@ -85,6 +85,47 @@ def _from_account_clause(value: str) -> tuple[str, str]:
     return "", f' from account {_to_applescript(value)}'
 
 
+# PAGOCS-PATCH: date-locale v1
+def _mkdate_handler() -> str:
+    """Return the AppleScript handler that builds a date from integers.
+
+    AppleScript compiles a ``date "..."`` literal in the user region format.
+    An English literal fails with error -30720 before the script runs when
+    that format is not English. Integer fields of ``current date`` do not
+    depend on the region. Day is set to 1 before the year and month so a
+    short month cannot overflow the previous day.
+
+    Returns:
+        Handler source. Scripts call ``my mkDate(year, month, day, seconds)``.
+        ``seconds`` is seconds after local midnight.
+    """
+    return """
+on mkDate(y, m, d, s)
+    set t to current date
+    set day of t to 1
+    set year of t to y
+    set month of t to m
+    set day of t to d
+    set time of t to s
+    return t
+end mkDate
+"""
+
+
+def _mkdate_call(dt: datetime) -> str:
+    """Return a locale-independent AppleScript expression for a datetime.
+
+    Args:
+        dt: Local calendar values. The clock time becomes seconds after midnight.
+
+    Returns:
+        A parenthesized ``my mkDate`` call. ``_tell`` prepends the handler
+        when the script body contains that call.
+    """
+    seconds = dt.hour * 3600 + dt.minute * 60 + dt.second
+    return f"(my mkDate({dt.year}, {dt.month}, {dt.day}, {seconds}))"
+
+
 def _tell(body: str) -> str:
     """Wrap body in a tell block targeting MailMaven.
 
@@ -96,8 +137,14 @@ def _tell(body: str) -> str:
                 -- create objects here
             end transaction
         end tell
+
+    A body that calls ``my mkDate`` gets the date handler before the tell.
+    ``my`` inside the tell resolves to that script handler, not to MailMaven.
     """
-    return f'tell application "{APP_NAME}"\n{body}\nend tell'
+    script = f'tell application "{APP_NAME}"\n{body}\nend tell'
+    if "my mkDate(" in body and "on mkDate(" not in script:
+        script = _mkdate_handler() + script
+    return script
 
 
 class ASConst:
@@ -182,7 +229,7 @@ def _to_applescript(val: Any) -> str:
     if isinstance(val, (int, float)):
         return str(val)
     if isinstance(val, datetime):
-        return val.strftime('date "%A, %B %d, %Y at %I:%M:%S %p"')
+        return _mkdate_call(val)
     if isinstance(val, list):
         return "{" + ", ".join(_to_applescript(v) for v in val) + "}"
     if isinstance(val, str):
@@ -1026,7 +1073,7 @@ def set_review_date(identifier: int, review_date: str | None = None) -> str:
             dt = datetime.fromisoformat(review_date)
         except ValueError:
             raise ValueError(f"Invalid date format: {review_date}. Use ISO format like '2025-12-25'.")
-        date_lit = dt.strftime('date "%A, %B %d, %Y"')
+        date_lit = _mkdate_call(dt.replace(hour=0, minute=0, second=0, microsecond=0))
     else:
         date_lit = "missing value"
 
