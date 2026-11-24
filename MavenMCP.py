@@ -182,13 +182,56 @@ SORT_CONSTANTS = {
 }
 
 
+def _review_mkdate_handler() -> str:
+    """Return the mkDate handler for scripts this branch builds.
+
+    AppleScript compiles a ``date "..."`` literal in the user region format,
+    so an English literal fails with error -30720 before the script runs.
+    Integer fields of ``current date`` do not depend on the region. Day is
+    set to 1 before the year and month so a short month cannot overflow.
+
+    ``_tell`` on pagocs/date-locale-fix prepends the same handler. Search
+    prepends this copy only when that handler is not already in the script,
+    so this branch works alone and a merge does not define ``mkDate`` twice.
+
+    Returns:
+        Handler source. Scripts call ``my mkDate(year, month, day, seconds)``.
+        ``seconds`` is seconds after local midnight.
+    """
+    return """
+on mkDate(y, m, d, s)
+    set t to current date
+    set day of t to 1
+    set year of t to y
+    set month of t to m
+    set day of t to d
+    set time of t to s
+    return t
+end mkDate
+"""
+
+
 def _as_date_literal(iso: str) -> ASConst:
-    """ISO date string -> AppleScript date literal (same style as set_review_date)."""
+    """ISO date -> locale-independent AppleScript date expression.
+
+    The value is local midnight on that calendar day. MailMaven expands a
+    review-date ``end date`` to 23:59:59 on the same day, so the day is
+    included and the caller must not advance ``review_date_to``.
+
+    Args:
+        iso: ``YYYY-MM-DD`` or a full ISO datetime. The clock time is dropped.
+
+    Returns:
+        Bare AppleScript expression. The search script must define ``mkDate``.
+
+    Raises:
+        ValueError: ``iso`` is not a valid ISO date.
+    """
     try:
         dt = datetime.fromisoformat(iso)
     except ValueError:
         raise ValueError(f"Invalid date format: {iso}. Use ISO format like '2025-12-25'.")
-    return ASConst(dt.strftime('date "%A, %B %d, %Y"'))
+    return ASConst(f"(my mkDate({dt.year}, {dt.month}, {dt.day}, 0))")
 
 FLAG_CONSTANTS = {
     "no flag": ASConst("no flag"),
@@ -602,7 +645,7 @@ def search_messages(
             ago (negative = in the future). Use with review_length_days.
         review_length_days: Length of the relative review-date window in days.
         review_date_from: ISO date (e.g. "2025-12-01"); review date on/after.
-        review_date_to: ISO date (e.g. "2025-12-31"); review date on/before.
+        review_date_to: ISO date (e.g. "2025-12-31"). That calendar day is included.
         sort_by: "date received" (default) or "review date".
         sort_ascending: Sort ascending (default False = newest first).
     """
@@ -696,6 +739,8 @@ def search_messages(
         if review_date_from:
             rprops["start date"] = _as_date_literal(review_date_from)
         if review_date_to:
+            # End date is the whole calendar day (effective end 23:59:59).
+            # Measured 2026-11-24: midnight and noon both landed on that day.
             rprops["end date"] = _as_date_literal(review_date_to)
         add_criterion("review date criterion", rprops)
     if mailbox_name:
@@ -774,6 +819,8 @@ def search_messages(
     """
 
     script = safe_str_handler() + "\n" + _tell(body)
+    if "my mkDate(" in script and "on mkDate(" not in script:
+        script = _review_mkdate_handler() + "\n" + script
     raw = _run_applescript(script, timeout=120)
     return _parse_messages_tsv(raw, include_content)
 
