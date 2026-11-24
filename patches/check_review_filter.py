@@ -5,10 +5,14 @@ Run on the Mac with the MailMavenMCP venv python:
     ~/mcp/MailMavenMCP/.venv/bin/python check_review_filter.py [path/to/MavenMCP.py]
 
 Read-only towards mail (only MailMaven temp query objects are created).
+Also checks that absolute review_date_from / review_date_to use mkDate and
+match review_due_within_days for today and for a 7-day span. The English
+date literal must be gone from the whole file, including set_review_date.
 Prints JSON {status, params_found, mcp_count, direct_count, details}.
 Exit: 0 = ok, 1 = missing, 2 = mismatch / error.
 """
 import importlib.util, inspect, json, os, subprocess, sys
+from datetime import date, timedelta
 
 LIMIT = 500
 path = os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else "~/mcp/MailMavenMCP/MavenMCP.py")
@@ -37,6 +41,15 @@ found = [p for p in params if any(k in p.lower() for k in ("review", "due", "tic
 out["params_found"] = found
 if not found:
     done("missing", 1, "no review/due/tickler parameter in search_messages")
+
+try:
+    source = open(path, encoding="utf-8").read()
+except Exception as e:
+    done("mismatch", 2, f"cannot read {path}: {e!r}")
+if 'date "%A, %B' in source:
+    done("missing", 1, "English AppleScript date literal still present")
+if "on mkDate(" not in source or "(my mkDate(" not in source:
+    done("missing", 1, "mkDate date builder missing")
 
 # MCP call (best-effort parameter choice)
 kwargs = {"limit": LIMIT}
@@ -98,10 +111,62 @@ for line in text.split("\n"):
 direct_set = set(direct)
 out["direct_count"] = len(direct)
 mcp_set = {(s, d.strip()) for s, d in mcp_set}
-if mcp_set == direct_set and out["mcp_count"] == len(direct):
-    done("ok", 0, f"used {kwargs}")
-done("mismatch", 2, json.dumps({
-    "used": {k: v for k, v in kwargs.items()},
-    "only_in_mcp": sorted(mcp_set - direct_set)[:20],
-    "only_in_direct": sorted(direct_set - mcp_set)[:20],
-}, ensure_ascii=False))
+if not (mcp_set == direct_set and out["mcp_count"] == len(direct)):
+    done("mismatch", 2, json.dumps({
+        "used": {k: v for k, v in kwargs.items()},
+        "only_in_mcp": sorted(mcp_set - direct_set)[:20],
+        "only_in_direct": sorted(direct_set - mcp_set)[:20],
+    }, ensure_ascii=False))
+
+
+def identifiers(rows):
+    """Return message identifiers from a search_messages result.
+
+    Args:
+        rows: Result dicts.
+
+    Returns:
+        Identifier strings, sorted, so order does not change the comparison.
+    """
+    return sorted(str(row.get("identifier", "")).strip() for row in rows)
+
+
+def search_ids(**extra):
+    """Run one read-only search and return its identifiers.
+
+    Args:
+        extra: search_messages keyword arguments besides the shared limit and sort.
+
+    Returns:
+        Sorted identifier strings.
+    """
+    found = fn(
+        limit=LIMIT,
+        include_content=False,
+        sort_by="date received",
+        sort_ascending=False,
+        **extra,
+    )
+    return identifiers(found)
+
+
+today = date.today()
+today_iso = today.isoformat()
+week_iso = (today + timedelta(days=7)).isoformat()
+try:
+    same_day = search_ids(review_date_from=today_iso, review_date_to=today_iso)
+    due_today = search_ids(review_due_within_days=0)
+    if same_day != due_today:
+        done("mismatch", 2, f"today absolute={len(same_day)} due0={len(due_today)}")
+    span = search_ids(review_date_from=today_iso, review_date_to=week_iso)
+    due_week = search_ids(review_due_within_days=7)
+    if span != due_week:
+        done("mismatch", 2, f"week absolute={len(span)} due7={len(due_week)}")
+except Exception as e:
+    done("mismatch", 2, f"absolute review date compare failed: {e!r}")
+
+done(
+    "ok",
+    0,
+    f"used {kwargs}; today={len(same_day)} week={len(span)}",
+)
