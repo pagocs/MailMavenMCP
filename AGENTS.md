@@ -29,4 +29,7 @@ Minden funkcióban legyen `# PAGOCS-PATCH: <név> v<N>` marker, és a `patches/`
 ~/mcp/MailMavenMCP/.venv/bin/python3 ~/mcp/MailMavenMCP/patches/check_review_filter.py
 ~/mcp/MailMavenMCP/.venv/bin/python3 ~/mcp/MailMavenMCP/patches/check_reply.py
 ~/mcp/MailMavenMCP/.venv/bin/python3 ~/mcp/MailMavenMCP/patches/check_tsv_fix.py
+~/mcp/MailMavenMCP/.venv/bin/python3 ~/mcp/MailMavenMCP/patches/check_days_back.py
 ```
+
+A `days-back` az upstream `search_messages` dátumablakát írja felül. Az upstream `starting at: -N`, `for duration: N` az előző N naptári nap, a mai nélkül. A patch: `starting at: 1-N`, `for duration: N`. Ez N naptári nap a maival bezárólag. Az 1 csak a mai nap. Nem gördülő N×24 óra. A `period_start_days_back` és a `period_length_days` marad, amit a hívó megad. Ha az `origin/main` ezen a blokkon változik, a `# PAGOCS-PATCH: days-back v1` marker és a `starting at: 1-N` sor újra rákerül, mielőtt a `pagocs/main` újraépül. A `check_days_back.py` `missing`, ha a marker nincs meg. Saját `pagocs/days-back` ág még nincs. A patch a `pagocs/main` commitjában van, a tiszta újraépítés leakasztja, amíg nincs saját ág.

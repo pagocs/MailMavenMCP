@@ -151,6 +151,9 @@ def run_osascript(script, argv=None, timeout=120):
 def direct_rows(limit):
     """List recent message ids and which returned field contains a break.
 
+    The date window matches days-back v1: N calendar days through today,
+    starting at 1-N. The upstream start of -N excludes today.
+
     Args:
         limit: Maximum messages, matching search_messages.
 
@@ -183,7 +186,7 @@ tell application "MailMaven"
         set logic of _q to all criteria
         set sort order of _q to sort by date received
         set sort ascending of _q to false
-        make new relative message date criterion with properties {{unit:day, starting at:-{DAYS_BACK}, for duration:{DAYS_BACK}}} at end of criteria of _q
+        make new relative message date criterion with properties {{unit:day, starting at:{1 - DAYS_BACK}, for duration:{DAYS_BACK}}} at end of criteria of _q
         set _msgs to messages of _q
         set _count to count of _msgs
         if _count > {limit} then set _count to {limit}

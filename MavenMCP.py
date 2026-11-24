@@ -501,7 +501,7 @@ def search_messages(
     flagged: str | None = None,
     importance: str | None = None,
     has_attachments: bool | None = None,
-    days_back: int | None = None,          # convenience: last N days through today
+    days_back: int | None = None,          # PAGOCS-PATCH: days-back v1 — N calendar days ending today
     period_start_days_back: int | None = None,  # explicit: window starts N days ago
     period_length_days: int | None = None,      # explicit: window spans this many days from that start
     mailbox_name: str | None = None,
@@ -536,7 +536,13 @@ def search_messages(
             "purple", "grey", or "no flag".
         importance: "very low", "low", "normal", "high", or "very high".
         has_attachments: True = only messages with attachments.
-        days_back: Only messages received in the last N days.
+        days_back: Messages from the last N calendar days, including today.
+            N=1 is today only. N=3 is today and the two previous calendar
+            days. Not a rolling N*24 hours. The calendar day N days before
+            today is outside the window. Ignored when both
+            period_start_days_back and period_length_days are set. That pair
+            uses the caller's own start and length (starting at minus the
+            start, for the given length) and does not add today by itself.
         mailbox_name: Restrict to a named mailbox.
         account_name: Restrict to a named account.
         limit: Max messages to return (default 50, hard cap 500).
@@ -608,9 +614,14 @@ def search_messages(
             "for duration": period_length_days,
         })
     elif days_back is not None and days_back > 0:
+        # PAGOCS-PATCH: days-back v1
+        # Upstream starting-at -N for duration N is the N calendar days
+        # before today, so today is excluded. Last N days includes today:
+        # the length stays N and the start moves one day later. MailMaven's
+        # end day is exclusive, which is why duration N from -N stops yesterday.
         add_criterion("relative message date criterion", {
             "unit": UNIT_DAY,
-            "starting at": -days_back,
+            "starting at": 1 - days_back,
             "for duration": days_back,
         })
     # PAGOCS-PATCH: review-date-filter v1 - review (Due) date criteria
